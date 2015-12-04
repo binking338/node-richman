@@ -22,7 +22,7 @@ var buildingTypes = [{
     customCost: [100, 1000, 1500],
     events: {
         enter: function(p, l) {
-            p.pay(l.customCost[l.level-1]);
+            p.pay(l.customCost[l.level-1], true);
         }
     }
 }];

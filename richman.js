@@ -7,13 +7,26 @@ var EVENT_NAMES = {
     "BEFOR_GO": "befor-go",
     "AFTER_GO": "after-go",
     "BEFOR_INVEST": "befor-invest",
-    "AFTER_INVEST": "after-invest"
+    "AFTER_INVEST": "after-invest",
+    "PLAYER_OVER": "player-over",
+    "GAME_OVER": "game-over"
 };
 var PLAYER_STATUS = {
     "STOP": "stop",
     "ROLL": "roll",
     "GO": "go",
-    "INVEST": "invest"
+    "INVEST": "invest",
+    "WAIT": "wait"
+};
+var OPTION = {
+    "STOP": 0,
+    "ROLL": 1,
+    "GO": 2,
+    "BUY": 4,
+    "BUILD": 8,
+    "UPGRADE": 16,
+    "NOINVEST": 32,
+    "CARD": 1024
 };
 
 function _trigger(name, args) {
@@ -106,16 +119,24 @@ player.prototype.trigger = _trigger;
 player.prototype.bind = _bind;
 player.prototype.unbind = _unbind;
 
-player.prototype.pay = function(n) {
+player.prototype.pay = function(n, force) {
     var p = this;
     var land = p.map.locate(p.location);
+    if (n <= 0) {
+        return p;
+    }
     if (p.money >= n) {
         p.money -= n;
-    } else {
+    } else if (force) {
         p.isBroken = true;
         p.location = null;
+        p.game.trigger(EVENT_NAMES.PLAYER_OVER, [p, land]);
+        p.game.nextPlayer();
         land.players.splice(land.players.indexOf(p.name), 1);
         p.game.players.splice(p.game.players.indexOf(p), 1);
+        if (p.game.players.length == 1) {
+            p.game.trigger(EVENT_NAMES.GAME_OVER, [p.game.players[0], p.map.locate(p.game.players[0].location)]);
+        }
     }
 };
 
@@ -142,46 +163,84 @@ player.prototype.go = function() {
 
         return p;
     }
-    p.trigger(EVENT_NAMES.BEFOR_GO, [p, land]);
-    land.players.splice(land.players.indexOf(p.name), 1);
-    land.trigger(EVENT_NAMES.LEAVE, [p, land]);
-    while (p.forwardCount != 0) {
-        if (p.forwardCount > 0) {
-            land = p.map.locate(land.nextLand);
-            p.forwardCount--;
-        } else {
-            land = p.map.locate(land.prevLand);
-            p.forwardCount++;
+    if (p.status == PLAYER_STATUS.GO) {
+        p.trigger(EVENT_NAMES.BEFOR_GO, [p, land]);
+        land.players.splice(land.players.indexOf(p.name), 1);
+        land.trigger(EVENT_NAMES.LEAVE, [p, land]);
+        while (p.forwardCount != 0) {
+            if (p.forwardCount > 0) {
+                land = p.map.locate(land.nextLand);
+                p.forwardCount--;
+            } else {
+                land = p.map.locate(land.prevLand);
+                p.forwardCount++;
+            }
+            if (p.forwardCount == 0) {
+                p.location = land.name;
+                land.players.push(p.name);
+                land.trigger(EVENT_NAMES.ENTER, [p, land]);
+            } else {
+                land.trigger(EVENT_NAMES.PASS, [p, land]);
+            }
         }
-        if (Math.abs(p.forwardCount) == 1) {
-            land.players.push(p.name);
-            land.trigger(EVENT_NAMES.ENTER, [p, land]);
-        } else {
-            land.trigger(EVENT_NAMES.PASS, [p, land]);
-        }
+        p.trigger(EVENT_NAMES.AFTER_GO, [p, land]);
+        p.status = PLAYER_STATUS.INVEST;
     }
-    p.trigger(EVENT_NAMES.AFTER_GO, [p, land]);
-    p.status = PLAYER_STATUS.INVEST;
     return p;
 };
-player.prototype.buyLand = function() {
+player.prototype.wcid = function() {
     var p = this;
     var land = p.map.locate(p.location);
-    if (land.owner == null) {
+    var opt = OPTION.NONE;
+    switch (p.status) {
+        case PLAYER_STATUS.STOP:
+            break;
+        case PLAYER_STATUS.ROLL:
+            opt += OPTION.ROLL + OPTION.CARD;
+            break;
+        case PLAYER_STATUS.GO:
+            opt += OPTION.GO;
+            return p.go().wcid();
+        case PLAYER_STATUS.INVEST:
+            opt += OPTION.NOINVEST;
+            if (land.owner == null) {
+                opt += OPTION.BUY;
+            } else if (land.owner == p.name && land.building == null) {
+                opt += OPTION.BUILD;
+            } else if (land.building != null && land.building.owner == p.name && land.building.level < land.building.buildCost.length) {
+                opt += OPTION.UPGRADE;
+            } else {
+                return p.noinvest().wcid();
+            }
+            break;
+        case PLAYER_STATUS.WAIT:
+            opt += OPTION.CARD;
+            break;
+    }
+    return opt;
+};
+player.prototype.buy = function() {
+    var p = this;
+    var land = p.map.locate(p.location);
+    if (p.status == PLAYER_STATUS.INVEST && land.owner == null && p.money >= land.price) {
         p.trigger(EVENT_NAMES.BEFOR_INVEST, [p, land]);
 
+        p.pay(land.price);
         land.owner = p.name;
 
         p.trigger(EVENT_NAMES.AFTER_INVEST, [p, land]);
+        p.status = PLAYER_STATUS.WAIT;
     }
     return p;
 };
-player.prototype.build = function(buildingType) {
+player.prototype.build = function(buildingTypeName) {
     var p = this;
     var land = p.map.locate(p.location);
-    if (land.owner == p.name && (land.planTypes == null || land.planTypes == [] || land.planTypes.indexOf(buildingType.type) >= 0) && (land.banTypes == null || land.banTypes == [] || land.banTypes.indexOf(buildingType.type) < 0)) {
+    var buildingType = p.map.buildingTypesMap[buildingTypeName];
+    if (p.status == PLAYER_STATUS.INVEST && land.owner == p.name && p.money >= buildingType.buildCost[0] && (land.planTypes == null || land.planTypes == [] || land.planTypes.indexOf(buildingType.type) >= 0) && (land.banTypes == null || land.banTypes == [] || land.banTypes.indexOf(buildingType.type) < 0)) {
         p.trigger(EVENT_NAMES.BEFOR_INVEST, [p, land]);
 
+        p.pay(buildingType.buildCost[0]);
         var b = new building(buildingType.type, buildingType.buildCost, buildingType.customCost, buildingType.events);
         b.owner = p.name;
         b.location = p.location;
@@ -189,25 +248,41 @@ player.prototype.build = function(buildingType) {
         p.map.buildings.push(b);
 
         p.trigger(EVENT_NAMES.AFTER_INVEST, [p, land]);
+        p.status = PLAYER_STATUS.WAIT;
     }
     return p;
 };
 player.prototype.upgrade = function() {
     var p = this;
     var land = p.map.locate(p.location);
-    if (land.building.owner == p.name && land.building.level < land.building.buildCost.length) {
+    if (p.status == PLAYER_STATUS.INVEST && land.building != null && land.building.owner == p.name && land.building.level < land.building.buildCost.length && p.money >= land.building.buildCost[land.building.level]) {
         p.trigger(EVENT_NAMES.BEFOR_INVEST, [p, land]);
 
+        p.pay(land.building.buildCost[land.building.level]);
         land.building.level++;
 
         p.trigger(EVENT_NAMES.AFTER_INVEST, [p, land]);
+        p.status = PLAYER_STATUS.WAIT;
     }
+    return p;
+};
+player.prototype.noinvest = function() {
+    var p = this;
+    var land = p.map.locate(p.location);
+    p.status = PLAYER_STATUS.WAIT;
+    return p;
+};
+player.prototype.usecard = function(cardno) {
+    var p = this;
+    var land = p.map.locate(p.location);
+    // card logic
     return p;
 };
 player.prototype.done = function() {
     var p = this;
     var land = p.map.locate(p.location);
     p.game.nextPlayer();
+    return p;
 };
 
 function map(lands, buildingTypes) {
@@ -285,5 +360,9 @@ module.exports = {
     "game": game,
     "player": player,
     "land": land,
-    "building": building
+    "building": building,
+    "const": {
+        "EVENT_NAMES": EVENT_NAMES,
+        "PLAYER_STATUS": PLAYER_STATUS
+    }
 };
